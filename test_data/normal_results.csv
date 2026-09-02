@@ -1,0 +1,7 @@
+test_name,value,unit
+hemoglobin,14.2,g/dL
+wbc,6.8,10^3/uL
+platelet_count,280,10^3/uL
+glucose,88,mg/dL
+sodium,140,mmol/L
+creatinine,0.9,mg/dL

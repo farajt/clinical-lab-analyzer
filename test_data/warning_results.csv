@@ -1,0 +1,7 @@
+test_name,value,unit
+hemoglobin,10.8,g/dL
+glucose,118,mg/dL
+potassium,5.6,mmol/L
+alt,72,U/L
+tsh,5.2,mIU/L
+platelet_count,130,10^3/uL

@@ -1,0 +1,8 @@
+test_name,value,unit
+hemoglobin,6.2,g/dL
+glucose,410,mg/dL
+sodium,118,mmol/L
+potassium,6.9,mmol/L
+platelet_count,15,10^3/uL
+vitamin_d,32,ng/mL
+creatinine,,mg/dL
