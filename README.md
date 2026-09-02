@@ -1,102 +1,163 @@
 # Clinical Lab Results Analyzer
 
-A full-stack app that takes lab test results, classifies them **Normal / Warning / Critical**
-against reference ranges, and uses an LLM to explain *why* — not just label them — plus suggests
-next steps. Built around Explainable AI: every flagged result shows the number, the range, and the
-reasoning behind the status.
+A full-stack tool that takes lab test results and tells you not just whether
+something is abnormal, but why. Every flagged result is compared against a
+reference range and explained in plain clinical language, with suggested
+next steps — built around the idea that clinicians should be able to see
+the reasoning behind a classification, not just a red or yellow label.
 
-## Architecture
+## How it works
 
 ```
-React (Vite)                FastAPI                    MCP Server              Groq / Ollama
-LabInput.jsx  ──POST──►  /analyze_labs  ──LangGraph──►  reference_range_lookup
-ResultsDisplay.jsx                        agent            classify_value        LLM explanation
-SeverityBadge.jsx                     (classify→route→explain)                  (structured output)
+React (Vite)              FastAPI                 MCP Server            Groq
+LabInput.jsx   --POST-->  /analyze_labs  -------->  reference lookup
+ResultsDisplay.jsx          |                        classify_value    LLM explanation
+SeverityBadge.jsx      LangGraph agent          (real MCP protocol,   (structured output,
+                    classify -> route -> explain   over stdio)         called per result)
 ```
 
-- **Agent (LangGraph)**: three sequential nodes.
-  - `classify` — for each lab result, calls the **MCP server's** `classify_value` tool (real
-    MCP protocol over stdio, not a plain function call) to compare the value against reference
-    ranges and assign Normal/Warning/Critical. Handles missing values, non-numeric values, and
-    unknown test names without crashing.
-  - `route` — groups results into `critical` / `warning` / `normal` / `unresolved` buckets,
-    critical-first.
-  - `explain` — calls the LLM (via LangChain, structured output) for every result to generate a
-    plain-language clinical explanation and next steps.
-- **MCP server** (`app/mcp_server.py`) exposes `reference_range_lookup` and `classify_value` as
-  MCP tools. The agent never touches the reference-range dict directly — it always goes through
-  the MCP client (`app/mcp_client.py`).
-- **Frontend**: manual form entry or CSV upload → POST to `/analyze_labs` → results rendered
-  grouped by severity with color-coded badges, explanations, and next steps.
+The agent is a three-node LangGraph pipeline:
 
-## AI Provider
+- **classify** — for every lab result, calls the MCP server's
+  `classify_value` tool over the actual MCP protocol (not a plain function
+  call) to compare the value against a reference range and assign
+  Normal / Warning / Critical. Handles three kinds of messy input without
+  crashing: missing values, unknown test names, and non-numeric results.
+- **route** — groups results into critical / warning / normal / unresolved,
+  critical first.
+- **explain** — calls the LLM once per result (even for Normal ones) to
+  produce a short, specific explanation and 1–3 next steps.
 
-**Groq** (`llama-3.1-8b-instant`) by default — fast, generous free tier, drop-in via
-`langchain-groq`. **Ollama** is supported as a fully local, no-API-key fallback — switch with one
-env var (`LLM_PROVIDER=ollama`), no code changes.
+Reference ranges come from two places. If the input row already states its
+own range (like the Kaggle dataset does, via `Min_Reference`/`Max_Reference`
+columns), the MCP tool uses that directly. If not, it falls back to a
+hardcoded dictionary of ~12 common tests. A critical band is derived as 50%
+of the normal range's width beyond each edge, so a result has to be clearly
+outside normal — not just barely over — to get flagged Critical instead of
+Warning.
+
+Some lab tests aren't numbers at all — urine dipstick results like
+"Negatif" or "1+". These are handled separately: the classifier tries a
+numeric parse first, and only falls back to qualitative interpretation
+(Normal/Negative → Normal, 1+/2+/Positive → Warning) if the value genuinely
+isn't a number.
+
+## AI provider
+
+Groq, via `langchain-groq`, using `openai/gpt-oss-20b`. Groq's free tier is
+generous and fast enough that explanations come back in a second or two.
+Ollama is supported as a fully local fallback with no API key — switching
+providers is one line in `.env` (`LLM_PROVIDER=ollama`), no code changes.
+
+## Data source
+
+Built against the Kaggle dataset *Laboratory Test Results – Anonymized
+Dataset*. It's been tested end-to-end with a real 27-row export from that
+dataset — including Turkish test names, dataset-provided reference ranges,
+and both qualitative and numeric urine strip results. Result: 26 Normal,
+1 Warning (a positive erythrocyte strip test, correctly flagged), 0
+unresolved.
+
+The `/test_data` folder also has three smaller synthetic CSVs
+(`normal_results.csv`, `warning_results.csv`, `critical_results.csv`) for
+quickly exercising each severity tier without needing a Kaggle account.
 
 ## Setup
 
 ### Backend
+
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # Mac/Linux
 pip install -r requirements.txt
 cp .env.example .env
-# edit .env: set GROQ_API_KEY (get a free key at console.groq.com)
+```
+
+Edit `.env`:
+
+```
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_key_here       # free at console.groq.com
+GROQ_MODEL=openai/gpt-oss-20b
+```
+
+Then run it:
+
+```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
+Check `http://localhost:8000/health` — should return `{"status":"ok"}`.
+
 ### Frontend
+
 ```bash
 cd frontend
 npm install
-cp .env.example .env   # defaults to http://localhost:8000, edit if needed
+cp .env.example .env    # VITE_API_BASE_URL=http://localhost:8000
 npm run dev
 ```
-Open the printed local URL (default `http://localhost:5173`).
+
+Open the local URL Vite prints (usually `http://localhost:5173`).
 
 ### Using Ollama instead of Groq
+
 ```bash
 ollama pull llama3.1
-# in backend/.env: LLM_PROVIDER=ollama
 ```
 
-## How to test
+Then in `backend/.env`, set `LLM_PROVIDER=ollama`.
 
-1. Start both servers (above).
-2. In the UI, switch to **Upload CSV** and pick a file from `/test_data`:
-   - `normal_results.csv` — all results in range
-   - `warning_results.csv` — mildly abnormal results
-   - `critical_results.csv` — severe results, plus an unknown test name and a missing value
-     (exercises error handling)
-3. Or use **Manual entry** to type in individual results.
+## A note on Windows
+
+Spawning the MCP server as a subprocess requires the Proactor event loop,
+which uvicorn doesn't reliably use on Windows, especially with `--reload`.
+`mcp_client.py` works around this by running MCP calls on a dedicated
+background thread with its own event loop, so this works the same on
+Windows, Mac, and Linux without any platform-specific setup on your end.
+
+## Testing
+
+1. Start both servers as above.
+2. Upload any file in `/test_data`, or a CSV exported from the Kaggle
+   dataset, via the "Upload CSV" tab.
+3. Or use "Manual entry" to type in individual results.
 4. Or hit the API directly:
-   ```bash
-   curl -X POST http://localhost:8000/analyze_labs \
-     -H "Content-Type: application/json" \
-     -d '{"labs": [{"test_name": "hemoglobin", "value": 6.5, "unit": "g/dL"}]}'
-   ```
+
+```bash
+curl -X POST http://localhost:8000/analyze_labs \
+  -H "Content-Type: application/json" \
+  -d '{"labs": [{"test_name": "hemoglobin", "value": 6.5, "unit": "g/dL"}]}'
+```
 
 ## Project structure
+
 ```
 backend/app/
   main.py              FastAPI app, /analyze_labs endpoint
   agent.py             LangGraph agent (classify -> route -> explain)
-  mcp_server.py         MCP server: reference_range_lookup, classify_value tools
-  mcp_client.py          MCP client used by the agent
-  reference_data.py      Hardcoded reference ranges
+  mcp_server.py        MCP server: reference_range_lookup, classify_value tools
+  mcp_client.py         MCP client (background-thread event loop, Windows-safe)
+  reference_data.py      Hardcoded fallback reference ranges
   llm.py                  Groq/Ollama provider switch
-  schemas.py               Pydantic request/response models
+  schemas.py                Pydantic request/response models
 frontend/src/
   App.jsx
   api.js
   components/LabInput.jsx, ResultsDisplay.jsx, SeverityBadge.jsx
-test_data/                 3 synthetic CSVs
+test_data/                  3 synthetic CSVs + a sample from the real Kaggle dataset
 ```
 
 ## Known limitations
-- Reference range dict covers 12 common tests; unknown tests are routed to "unresolved" rather
+
+- The hardcoded reference-range dictionary covers common tests only;
+  anything outside it needs a dataset row that supplies its own
+  `min_reference`/`max_reference`, or it's routed to "unresolved" rather
   than guessed at.
-- MCP server is spawned per-request via stdio for simplicity; a production build would keep a
-  persistent MCP session.
+- The MCP server is spawned fresh per request rather than kept as a
+  long-lived session — simpler to reason about, at some cost to latency.
+- Qualitative strip-test interpretation only recognizes a small set of
+  standard phrases (Normal/Negative/1+ through 4+/Positive); anything else
+  is reported as unresolved rather than misclassified.
